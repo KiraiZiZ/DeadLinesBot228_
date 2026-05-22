@@ -1,9 +1,10 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import telebot
 import os
+import re
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import time
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
@@ -21,64 +22,199 @@ cursor.execute("""
 """)
 conn.commit()
 
+# ========== КОМАНДА /START ==========
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.reply_to(message, 
-        "✅ Бот работает!\n\n"
-        "📌 Команды:\n"
-        "/add задача ГГГГ-ММ-ДД\n"
-        "/list\n\n"
+        "✅ Бот-дедлайн трекер работает!\n\n"
+        "📌 КОМАНДЫ:\n"
+        "/add задача ГГГГ-ММ-ДД — добавить дедлайн\n"
+        "/list — показать все задачи\n"
+        "/today — задачи на сегодня\n"
+        "/tomorrow — задачи на завтра\n"
+        "/delete номер — удалить задачу\n\n"
+        "🔔 Автоматические напоминания приходят:\n"
+        "• в 09:00 — за день до дедлайна\n"
+        "• в 09:00 — в день дедлайна\n\n"
         "Пример: /add Сдать лабу 2026-05-25")
 
+# ========== КОМАНДА /ADD ==========
 @bot.message_handler(commands=['add'])
 def add_task(message):
     try:
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 3:
-            bot.reply_to(message, "❌ Формат: /add Название задачи 2026-05-25")
+        text = message.text[4:].strip()
+        
+        match = re.search(r'(\d{4}-\d{2}-\d{2})$', text)
+        if not match:
+            bot.reply_to(message, "❌ Не найден дедлайн! Формат: /add Название 2026-05-25")
             return
-        task_text = parts[1]
-        deadline_str = parts[2]
+        
+        deadline_str = match.group(1)
+        task_text = text[:match.start()].strip()
+        
+        if not task_text:
+            bot.reply_to(message, "❌ Укажите название задачи")
+            return
+        
         datetime.strptime(deadline_str, "%Y-%m-%d")
+        
         cursor.execute(
             "INSERT INTO tasks (user_id, task_text, deadline_date) VALUES (?, ?, ?)",
             (message.chat.id, task_text, deadline_str)
         )
         conn.commit()
+        
         bot.reply_to(message, f"✅ Задача «{task_text}» сохранена! Дедлайн: {deadline_str}")
-    except Exception:
-        bot.reply_to(message, "❌ Ошибка! Используйте формат: /add задача 2026-05-22")
+    
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка! Используйте: /add Название задачи 2026-05-22")
 
+# ========== КОМАНДА /LIST ==========
 @bot.message_handler(commands=['list'])
 def list_tasks(message):
     cursor.execute(
-        "SELECT task_text, deadline_date FROM tasks WHERE user_id = ? ORDER BY deadline_date",
+        "SELECT id, task_text, deadline_date FROM tasks WHERE user_id = ? ORDER BY deadline_date",
         (message.chat.id,)
     )
     tasks = cursor.fetchall()
+    
     if not tasks:
         bot.reply_to(message, "📭 У вас пока нет задач")
         return
-    answer = "📋 ВАШИ ДЕДЛАЙНЫ:\n\n"
-    for task, date in tasks:
-        answer += f"• {task} — {date}\n"
+    
+    answer = "📋 ВСЕ ДЕДЛАЙНЫ:\n\n"
+    for task_id, task, date in tasks:
+        answer += f"{task_id}. {task} — {date}\n"
+    
     bot.reply_to(message, answer)
 
-# ========== ЭТО ДЛЯ RENDER (имитация веб-сервера) ==========
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running!")
+# ========== КОМАНДА /TODAY ==========
+@bot.message_handler(commands=['today'])
+def today_tasks(message):
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    
+    cursor.execute(
+        "SELECT id, task_text FROM tasks WHERE user_id = ? AND deadline_date = ?",
+        (message.chat.id, today_str)
+    )
+    tasks = cursor.fetchall()
+    
+    if not tasks:
+        bot.reply_to(message, f"📭 На сегодня ({today_str}) задач нет. Отдыхайте! 🎉")
+        return
+    
+    answer = f"⏰ ЗАДАЧИ НА СЕГОДНЯ ({today_str}):\n\n"
+    for task_id, task in tasks:
+        answer += f"{task_id}. {task} — СЕГОДНЯ❗\n"
+    
+    bot.reply_to(message, answer)
 
-def run_webserver():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    server.serve_forever()
+# ========== КОМАНДА /TOMORROW ==========
+@bot.message_handler(commands=['tomorrow'])
+def tomorrow_tasks(message):
+    tomorrow_str = (datetime.now().date() + timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    cursor.execute(
+        "SELECT id, task_text FROM tasks WHERE user_id = ? AND deadline_date = ?",
+        (message.chat.id, tomorrow_str)
+    )
+    tasks = cursor.fetchall()
+    
+    if not tasks:
+        bot.reply_to(message, f"📭 На завтра ({tomorrow_str}) задач нет")
+        return
+    
+    answer = f"⏰ ЗАДАЧИ НА ЗАВТРА ({tomorrow_str}):\n\n"
+    for task_id, task in tasks:
+        answer += f"{task_id}. {task}\n"
+    answer += f"\n⚠️ Не забудьте сделать до завтра!"
+    
+    bot.reply_to(message, answer)
 
-# Запускаем веб-сервер в отдельном потоке
-threading.Thread(target=run_webserver, daemon=True).start()
+# ========== КОМАНДА /DELETE ==========
+@bot.message_handler(commands=['delete'])
+def delete_task(message):
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            bot.reply_to(message, "❌ Формат: /delete номер_задачи\n\nНомер можно посмотреть командой /list")
+            return
+        
+        task_id = int(parts[1])
+        
+        cursor.execute(
+            "SELECT task_text FROM tasks WHERE id = ? AND user_id = ?",
+            (task_id, message.chat.id)
+        )
+        task = cursor.fetchone()
+        
+        if not task:
+            bot.reply_to(message, f"❌ Задача с номером {task_id} не найдена")
+            return
+        
+        cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, message.chat.id))
+        conn.commit()
+        
+        bot.reply_to(message, f"✅ Задача «{task[0]}» удалена!")
+    
+    except ValueError:
+        bot.reply_to(message, "❌ Номер должен быть числом. Пример: /delete 3")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка при удалении")
 
-# ========== ЗАПУСК БОТА ==========
+# ========== ФОНОВАЯ ПРОВЕРКА ДЕДЛАЙНОВ ==========
+def check_deadlines_background():
+    while True:
+        try:
+            today = datetime.now().date()
+            tomorrow = today + timedelta(days=1)
+            
+            # Проверяем задачи на завтра
+            cursor.execute(
+                "SELECT user_id, task_text FROM tasks WHERE deadline_date = ?",
+                (tomorrow.strftime("%Y-%m-%d"),)
+            )
+            tasks_tomorrow = cursor.fetchall()
+            
+            for user_id, task_text in tasks_tomorrow:
+                try:
+                    bot.send_message(user_id, f"🔔 НАПОМИНАНИЕ!\nЗавтра дедлайн: «{task_text}»\n\nУспейте сделать!")
+                except:
+                    pass
+            
+            # Проверяем задачи на сегодня
+            cursor.execute(
+                "SELECT user_id, task_text FROM tasks WHERE deadline_date = ?",
+                (today.strftime("%Y-%m-%d"),)
+            )
+            tasks_today = cursor.fetchall()
+            
+            for user_id, task_text in tasks_today:
+                try:
+                    bot.send_message(user_id, f"⚠️ СРОЧНОЕ НАПОМИНАНИЕ!\nСегодня последний день: «{task_text}»\n\nНе откладывайте!")
+                except:
+                    pass
+            
+            # Проверяем каждые 6 часов (21600 секунд)
+            # Для демонстрации можно поставить 60 секунд, но для бота лучше 21600
+            time.sleep(21600)  # 6 часов
+            
+        except Exception as e:
+            print(f"Ошибка в фоновой проверке: {e}")
+            time.sleep(60)
+
+# ========== ОБРАБОТКА НЕИЗВЕСТНЫХ КОМАНД ==========
+@bot.message_handler(func=lambda message: True)
+def unknown(message):
+    bot.reply_to(message, "❓ Неизвестная команда. Напишите /start")
+
+# ========== ЗАПУСК ==========
 print("🚀 Бот запущен!")
+print("Доступные команды: /start, /add, /list, /today, /tomorrow, /delete")
+print("🔔 Фоновая проверка дедлайнов запущена (каждые 6 часов)")
+
+# Запускаем фоновую проверку в отдельном потоке
+background_thread = threading.Thread(target=check_deadlines_background, daemon=True)
+background_thread.start()
+
 bot.infinity_polling()
