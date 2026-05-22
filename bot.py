@@ -229,4 +229,4 @@ print("🔔 Фоновая проверка дедлайнов запущена 
 background_thread = threading.Thread(target=check_deadlines_background, daemon=True)
 background_thread.start()
 
-bot.infinity_polling()
+
