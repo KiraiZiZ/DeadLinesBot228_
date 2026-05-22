@@ -2,8 +2,10 @@ import sqlite3
 from datetime import datetime
 import telebot
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN")  
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -62,5 +64,21 @@ def list_tasks(message):
         answer += f"• {task} — {date}\n"
     bot.reply_to(message, answer)
 
+# ========== ЭТО ДЛЯ RENDER (имитация веб-сервера) ==========
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def run_webserver():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    server.serve_forever()
+
+# Запускаем веб-сервер в отдельном потоке
+threading.Thread(target=run_webserver, daemon=True).start()
+
+# ========== ЗАПУСК БОТА ==========
 print("🚀 Бот запущен!")
 bot.infinity_polling()
