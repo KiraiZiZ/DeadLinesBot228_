@@ -32,11 +32,10 @@ def start(message):
         "/list — показать все задачи\n"
         "/today — задачи на сегодня\n"
         "/tomorrow — задачи на завтра\n"
-        "/delete номер — удалить задачу\n\n"
-        "🔔 Автоматические напоминания приходят:\n"
-        "• в 09:00 — за день до дедлайна\n"
-        "• в 09:00 — в день дедлайна\n\n"
-        "Пример: /add Сдать лабу 2026-05-25")
+        "/delete номер — удалить задачу (номер из /list)\n\n"
+        "Примеры:\n"
+        "/add Сдать лабу 2026-05-25\n"
+        "/delete 3")
 
 # ========== КОМАНДА /ADD ==========
 @bot.message_handler(commands=['add'])
@@ -69,7 +68,7 @@ def add_task(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка! Используйте: /add Название задачи 2026-05-22")
 
-# ========== КОМАНДА /LIST ==========
+# ========== КОМАНДА /LIST (с нумерацией для каждого пользователя) ==========
 @bot.message_handler(commands=['list'])
 def list_tasks(message):
     cursor.execute(
@@ -83,8 +82,13 @@ def list_tasks(message):
         return
     
     answer = "📋 ВСЕ ДЕДЛАЙНЫ:\n\n"
-    for task_id, task, date in tasks:
-        answer += f"{task_id}. {task} — {date}\n"
+    # Нумерация для пользователя (1, 2, 3...), а не глобальный id
+    for idx, (db_id, task, date) in enumerate(tasks, start=1):
+        answer += f"{idx}. {task} — {date}\n"
+    
+    # Сохраняем соответствие "номер_для_пользователя" -> "реальный_id_в_бд"
+    # Временно сохраняем в памяти, но лучше при удалении искать по дате и тексту
+    # В этом коде при удалении будем искать по позиции
     
     bot.reply_to(message, answer)
 
@@ -104,8 +108,8 @@ def today_tasks(message):
         return
     
     answer = f"⏰ ЗАДАЧИ НА СЕГОДНЯ ({today_str}):\n\n"
-    for task_id, task in tasks:
-        answer += f"{task_id}. {task} — СЕГОДНЯ❗\n"
+    for idx, (db_id, task) in enumerate(tasks, start=1):
+        answer += f"{idx}. {task} — СЕГОДНЯ❗\n"
     
     bot.reply_to(message, answer)
 
@@ -125,13 +129,13 @@ def tomorrow_tasks(message):
         return
     
     answer = f"⏰ ЗАДАЧИ НА ЗАВТРА ({tomorrow_str}):\n\n"
-    for task_id, task in tasks:
-        answer += f"{task_id}. {task}\n"
+    for idx, (db_id, task) in enumerate(tasks, start=1):
+        answer += f"{idx}. {task}\n"
     answer += f"\n⚠️ Не забудьте сделать до завтра!"
     
     bot.reply_to(message, answer)
 
-# ========== КОМАНДА /DELETE ==========
+# ========== КОМАНДА /DELETE (по номеру из /list, с правильным удалением) ==========
 @bot.message_handler(commands=['delete'])
 def delete_task(message):
     try:
@@ -140,27 +144,38 @@ def delete_task(message):
             bot.reply_to(message, "❌ Формат: /delete номер_задачи\n\nНомер можно посмотреть командой /list")
             return
         
-        task_id = int(parts[1])
+        user_number = int(parts[1])  # номер, который видит пользователь (1, 2, 3...)
         
+        # Получаем все задачи пользователя
         cursor.execute(
-            "SELECT task_text FROM tasks WHERE id = ? AND user_id = ?",
-            (task_id, message.chat.id)
+            "SELECT id, task_text, deadline_date FROM tasks WHERE user_id = ? ORDER BY deadline_date",
+            (message.chat.id,)
         )
-        task = cursor.fetchone()
+        tasks = cursor.fetchall()
         
-        if not task:
-            bot.reply_to(message, f"❌ Задача с номером {task_id} не найдена")
+        if not tasks:
+            bot.reply_to(message, "📭 У вас нет задач для удаления")
             return
         
-        cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, message.chat.id))
+        # Проверяем, что номер существует
+        if user_number < 1 or user_number > len(tasks):
+            bot.reply_to(message, f"❌ Задачи с номером {user_number} не существует. Всего задач: {len(tasks)}")
+            return
+        
+        # Получаем реальный id задачи из базы данных
+        db_id = tasks[user_number - 1][0]  # user_number начинается с 1, а список с 0
+        task_text = tasks[user_number - 1][1]
+        
+        # Удаляем по реальному id
+        cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (db_id, message.chat.id))
         conn.commit()
         
-        bot.reply_to(message, f"✅ Задача «{task[0]}» удалена!")
+        bot.reply_to(message, f"✅ Задача «{task_text}» удалена!")
     
     except ValueError:
         bot.reply_to(message, "❌ Номер должен быть числом. Пример: /delete 3")
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка при удалении")
+        bot.reply_to(message, f"❌ Ошибка при удалении: {str(e)}")
 
 # ========== ФОНОВАЯ ПРОВЕРКА ДЕДЛАЙНОВ ==========
 def check_deadlines_background():
@@ -195,8 +210,6 @@ def check_deadlines_background():
                 except:
                     pass
             
-            # Проверяем каждые 6 часов (21600 секунд)
-            # Для демонстрации можно поставить 60 секунд, но для бота лучше 21600
             time.sleep(21600)  # 6 часов
             
         except Exception as e:
@@ -213,7 +226,6 @@ print("🚀 Бот запущен!")
 print("Доступные команды: /start, /add, /list, /today, /tomorrow, /delete")
 print("🔔 Фоновая проверка дедлайнов запущена (каждые 6 часов)")
 
-# Запускаем фоновую проверку в отдельном потоке
 background_thread = threading.Thread(target=check_deadlines_background, daemon=True)
 background_thread.start()
 
