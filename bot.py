@@ -64,36 +64,40 @@ def start(message):
 @bot.message_handler(commands=['add'])
 def add_task(message):
     try:
-        # Берём текст после /add
         text = message.text[4:].strip()
+        print(f"[DEBUG] Получен текст: {text}")  # Это увидите в логах Render
         
-        # Ищем дату в формате ГГГГ-ММ-ДД в любом месте
         match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
         if not match:
             bot.reply_to(message, "❌ Не найден дедлайн! Формат: /add Название 2026-05-25")
             return
         
         deadline_str = match.group(1)
+        print(f"[DEBUG] Найдена дата: {deadline_str}")
         
-        # Всё, что до даты — название задачи
         parts = text.split(deadline_str)
         task_text = parts[0].strip()
+        print(f"[DEBUG] Название задачи: {task_text}")
         
         if not task_text:
             bot.reply_to(message, "❌ Укажите название задачи")
             return
         
-        # Проверяем корректность даты
         datetime.strptime(deadline_str, "%Y-%m-%d")
         
-        # Сохраняем в Supabase
+        # Пробуем добавить в базу
+        print(f"[DEBUG] Добавляю в Supabase: user_id={message.chat.id}, task={task_text}, date={deadline_str}")
         add_task_to_db(message.chat.id, task_text, deadline_str)
+        print(f"[DEBUG] Успешно добавлено!")
         
-        bot.reply_to(message, f"✅ Задача «{task_text}» сохранена в облаке! Дедлайн: {deadline_str}")
+        bot.reply_to(message, f"✅ Задача «{task_text}» сохранена! Дедлайн: {deadline_str}")
     
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка! Используйте: /add Название задачи 2026-05-22")
-
+        # ВЫВОДИМ РЕАЛЬНУЮ ОШИБКУ
+        error_text = str(e)
+        print(f"[ERROR] {error_text}")  # Это будет в логах Render
+        bot.reply_to(message, f"❌ Ошибка: {error_text}")
+        
 @bot.message_handler(commands=['list'])
 def list_tasks(message):
     tasks = get_user_tasks(message.chat.id)
