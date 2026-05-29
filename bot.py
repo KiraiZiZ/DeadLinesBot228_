@@ -64,15 +64,20 @@ def start(message):
 @bot.message_handler(commands=['add'])
 def add_task(message):
     try:
+        # Берём текст после /add
         text = message.text[4:].strip()
         
-        match = re.search(r'(\d{4}-\d{2}-\d{2})$', text)
+        # Ищем дату в формате ГГГГ-ММ-ДД в любом месте
+        match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
         if not match:
             bot.reply_to(message, "❌ Не найден дедлайн! Формат: /add Название 2026-05-25")
             return
         
         deadline_str = match.group(1)
-        task_text = text[:match.start()].strip()
+        
+        # Всё, что до даты — название задачи
+        parts = text.split(deadline_str)
+        task_text = parts[0].strip()
         
         if not task_text:
             bot.reply_to(message, "❌ Укажите название задачи")
