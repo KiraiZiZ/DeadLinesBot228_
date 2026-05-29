@@ -1,54 +1,64 @@
-import sqlite3
-from datetime import datetime, timedelta
 import telebot
 import os
 import re
 import threading
 import time
-from flask import Flask
+from datetime import datetime, timedelta
+from supabase import create_client, Client
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
+# Данные для подключения к Supabase (берутся из переменных окружения на Render)
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+# Создаём клиент Supabase
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 bot = telebot.TeleBot(TOKEN)
 
-# ========== БАЗА ДАННЫХ ==========
-conn = sqlite3.connect("deadlines.db", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        task_text TEXT,
-        deadline_date TEXT
-    )
-""")
-conn.commit()
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+def get_user_tasks(user_id):
+    """Получить все задачи пользователя, отсортированные по дате"""
+    response = supabase.table('tasks')\
+        .select('id, task_text, deadline_date')\
+        .eq('user_id', user_id)\
+        .order('deadline_date')\
+        .execute()
+    return response.data
 
-# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER (ОБЯЗАТЕЛЬНО!) ==========
-web_app = Flask(__name__)
+def add_task_to_db(user_id, task_text, deadline_date):
+    """Добавить задачу в базу"""
+    response = supabase.table('tasks').insert({
+        'user_id': user_id,
+        'task_text': task_text,
+        'deadline_date': deadline_date
+    }).execute()
+    return response.data
 
-@web_app.route('/')
-@web_app.route('/health')
-def health():
-    return "Bot is alive!", 200
-
-def run_web():
-    # Render требует порт 10000
-    web_app.run(host='0.0.0.0', port=10000)
+def delete_task_from_db(task_id, user_id):
+    """Удалить задачу из базы (проверяя, что задача принадлежит пользователю)"""
+    response = supabase.table('tasks')\
+        .delete()\
+        .eq('id', task_id)\
+        .eq('user_id', user_id)\
+        .execute()
+    return len(response.data) > 0
 
 # ========== КОМАНДЫ БОТА ==========
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, 
-        "✅ Бот-дедлайн трекер работает!\n\n"
+    bot.reply_to(message,
+        "✅ Бот-дедлайн трекер работает! Данные хранятся в облаке ☁️\n\n"
         "📌 КОМАНДЫ:\n"
         "/add задача ГГГГ-ММ-ДД — добавить дедлайн\n"
         "/list — показать все задачи\n"
         "/today — задачи на сегодня\n"
         "/tomorrow — задачи на завтра\n"
         "/delete номер — удалить задачу\n\n"
-        "Пример: /add Сдать лабу 2026-05-25")
+        "✨ Данные не теряются даже после перезапуска сервера!\n\n"
+        "Пример: /add Сдать лабу 2026-06-01")
 
 @bot.message_handler(commands=['add'])
 def add_task(message):
@@ -67,74 +77,62 @@ def add_task(message):
             bot.reply_to(message, "❌ Укажите название задачи")
             return
         
+        # Проверяем корректность даты
         datetime.strptime(deadline_str, "%Y-%m-%d")
         
-        cursor.execute(
-            "INSERT INTO tasks (user_id, task_text, deadline_date) VALUES (?, ?, ?)",
-            (message.chat.id, task_text, deadline_str)
-        )
-        conn.commit()
+        # Сохраняем в Supabase
+        add_task_to_db(message.chat.id, task_text, deadline_str)
         
-        bot.reply_to(message, f"✅ Задача «{task_text}» сохранена! Дедлайн: {deadline_str}")
+        bot.reply_to(message, f"✅ Задача «{task_text}» сохранена в облаке! Дедлайн: {deadline_str}")
     
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка! Используйте: /add Название задачи 2026-05-22")
 
 @bot.message_handler(commands=['list'])
 def list_tasks(message):
-    cursor.execute(
-        "SELECT id, task_text, deadline_date FROM tasks WHERE user_id = ? ORDER BY deadline_date",
-        (message.chat.id,)
-    )
-    tasks = cursor.fetchall()
+    tasks = get_user_tasks(message.chat.id)
     
     if not tasks:
         bot.reply_to(message, "📭 У вас пока нет задач")
         return
     
     answer = "📋 ВСЕ ДЕДЛАЙНЫ:\n\n"
-    for idx, (db_id, task, date) in enumerate(tasks, start=1):
-        answer += f"{idx}. {task} — {date}\n"
+    for idx, task in enumerate(tasks, start=1):
+        answer += f"{idx}. {task['task_text']} — {task['deadline_date']}\n"
     
     bot.reply_to(message, answer)
 
 @bot.message_handler(commands=['today'])
 def today_tasks(message):
     today_str = datetime.now().strftime("%Y-%m-%d")
+    tasks = get_user_tasks(message.chat.id)
     
-    cursor.execute(
-        "SELECT id, task_text FROM tasks WHERE user_id = ? AND deadline_date = ?",
-        (message.chat.id, today_str)
-    )
-    tasks = cursor.fetchall()
+    today_tasks_list = [t for t in tasks if t['deadline_date'] == today_str]
     
-    if not tasks:
+    if not today_tasks_list:
         bot.reply_to(message, f"📭 На сегодня ({today_str}) задач нет. Отдыхайте! 🎉")
         return
     
     answer = f"⏰ ЗАДАЧИ НА СЕГОДНЯ ({today_str}):\n\n"
-    for idx, (db_id, task) in enumerate(tasks, start=1):
-        answer += f"{idx}. {task} — СЕГОДНЯ❗\n"
+    for idx, task in enumerate(today_tasks_list, start=1):
+        answer += f"{idx}. {task['task_text']} — СЕГОДНЯ❗\n"
     
     bot.reply_to(message, answer)
 
 @bot.message_handler(commands=['tomorrow'])
 def tomorrow_tasks(message):
     tomorrow_str = (datetime.now().date() + timedelta(days=1)).strftime("%Y-%m-%d")
+    tasks = get_user_tasks(message.chat.id)
     
-    cursor.execute(
-        "SELECT id, task_text FROM tasks WHERE user_id = ? AND deadline_date = ?",
-        (message.chat.id, tomorrow_str)
-    )
-    tasks = cursor.fetchall()
+    tomorrow_tasks_list = [t for t in tasks if t['deadline_date'] == tomorrow_str]
     
-    if not tasks:
+    if not tomorrow_tasks_list:
         bot.reply_to(message, f"📭 На завтра ({tomorrow_str}) задач нет")
         return
     
     answer = f"⏰ ЗАДАЧИ НА ЗАВТРА ({tomorrow_str}):\n\n"
-    for idx, (db_id, task) in enumerate(tasks, start=1):
-        answer += f"{idx}. {task}\n"
+    for idx, task in enumerate(tomorrow_tasks_list, start=1):
+        answer += f"{idx}. {task['task_text']}\n"
     answer += f"\n⚠️ Не забудьте сделать до завтра!"
     
     bot.reply_to(message, answer)
@@ -148,12 +146,7 @@ def delete_task(message):
             return
         
         user_number = int(parts[1])
-        
-        cursor.execute(
-            "SELECT id, task_text, deadline_date FROM tasks WHERE user_id = ? ORDER BY deadline_date",
-            (message.chat.id,)
-        )
-        tasks = cursor.fetchall()
+        tasks = get_user_tasks(message.chat.id)
         
         if not tasks:
             bot.reply_to(message, "📭 У вас нет задач для удаления")
@@ -163,13 +156,14 @@ def delete_task(message):
             bot.reply_to(message, f"❌ Задачи с номером {user_number} не существует. Всего задач: {len(tasks)}")
             return
         
-        db_id = tasks[user_number - 1][0]
-        task_text = tasks[user_number - 1][1]
+        # Получаем реальный ID задачи из базы
+        task_id = tasks[user_number - 1]['id']
+        task_text = tasks[user_number - 1]['task_text']
         
-        cursor.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (db_id, message.chat.id))
-        conn.commit()
-        
-        bot.reply_to(message, f"✅ Задача «{task_text}» удалена!")
+        if delete_task_from_db(task_id, message.chat.id):
+            bot.reply_to(message, f"✅ Задача «{task_text}» удалена из облака!")
+        else:
+            bot.reply_to(message, f"❌ Не удалось удалить задачу")
     
     except ValueError:
         bot.reply_to(message, "❌ Номер должен быть числом. Пример: /delete 3")
@@ -182,30 +176,40 @@ def check_deadlines_background():
         try:
             today = datetime.now().date()
             tomorrow = today + timedelta(days=1)
+            tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+            today_str = today.strftime("%Y-%m-%d")
             
-            cursor.execute(
-                "SELECT user_id, task_text FROM tasks WHERE deadline_date = ?",
-                (tomorrow.strftime("%Y-%m-%d"),)
-            )
-            tasks_tomorrow = cursor.fetchall()
+            # Получаем задачи на завтра
+            response = supabase.table('tasks')\
+                .select('user_id, task_text')\
+                .eq('deadline_date', tomorrow_str)\
+                .execute()
             
-            for user_id, task_text in tasks_tomorrow:
-                try:
-                    bot.send_message(user_id, f"🔔 НАПОМИНАНИЕ!\nЗавтра дедлайн: «{task_text}»")
-                except:
-                    pass
+            notified_users = set()
+            for task in response.data:
+                user_id = task['user_id']
+                if user_id not in notified_users:
+                    try:
+                        bot.send_message(user_id, f"🔔 НАПОМИНАНИЕ!\nЗавтра дедлайн: «{task['task_text']}»")
+                        notified_users.add(user_id)
+                    except:
+                        pass
             
-            cursor.execute(
-                "SELECT user_id, task_text FROM tasks WHERE deadline_date = ?",
-                (today.strftime("%Y-%m-%d"),)
-            )
-            tasks_today = cursor.fetchall()
+            # Получаем задачи на сегодня
+            response = supabase.table('tasks')\
+                .select('user_id, task_text')\
+                .eq('deadline_date', today_str)\
+                .execute()
             
-            for user_id, task_text in tasks_today:
-                try:
-                    bot.send_message(user_id, f"⚠️ СРОЧНО!\nСегодня последний день: «{task_text}»")
-                except:
-                    pass
+            notified_users = set()
+            for task in response.data:
+                user_id = task['user_id']
+                if user_id not in notified_users:
+                    try:
+                        bot.send_message(user_id, f"⚠️ СРОЧНО!\nСегодня последний день: «{task['task_text']}»")
+                        notified_users.add(user_id)
+                    except:
+                        pass
             
             time.sleep(21600)  # 6 часов
             
@@ -213,26 +217,12 @@ def check_deadlines_background():
             print(f"Ошибка в фоновой проверке: {e}")
             time.sleep(60)
 
-# ========== ОБРАБОТКА ОСТАНОВКИ ==========
-import signal
-import sys
-
-def shutdown_handler(signum, frame):
-    print("Получен сигнал остановки, завершаю работу...")
-    bot.stop_polling()
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, shutdown_handler)
-signal.signal(signal.SIGINT, shutdown_handler)
-
 # ========== ЗАПУСК ==========
-print("🚀 Бот запущен!")
+print("🚀 Бот запущен с Supabase!")
 print("Доступные команды: /start, /add, /list, /today, /tomorrow, /delete")
-print("🔔 Фоновая проверка дедлайнов запущена (каждые 6 часов)")
+print("☁️ Данные хранятся в Supabase, ничего не потеряется!")
 
-web_thread = threading.Thread(target=run_web, daemon=True)
-web_thread.start()
-
+# Запускаем фоновую проверку
 background_thread = threading.Thread(target=check_deadlines_background, daemon=True)
 background_thread.start()
 
