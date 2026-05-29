@@ -213,18 +213,27 @@ def check_deadlines_background():
             print(f"Ошибка в фоновой проверке: {e}")
             time.sleep(60)
 
+# ========== ОБРАБОТКА ОСТАНОВКИ ==========
+import signal
+import sys
+
+def shutdown_handler(signum, frame):
+    print("Получен сигнал остановки, завершаю работу...")
+    bot.stop_polling()
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, shutdown_handler)
+signal.signal(signal.SIGINT, shutdown_handler)
+
 # ========== ЗАПУСК ==========
 print("🚀 Бот запущен!")
 print("Доступные команды: /start, /add, /list, /today, /tomorrow, /delete")
 print("🔔 Фоновая проверка дедлайнов запущена (каждые 6 часов)")
 
-# Запускаем веб-сервер в фоновом потоке (ОБЯЗАТЕЛЬНО для Render!)
 web_thread = threading.Thread(target=run_web, daemon=True)
 web_thread.start()
 
-# Запускаем фоновую проверку дедлайнов
 background_thread = threading.Thread(target=check_deadlines_background, daemon=True)
 background_thread.start()
 
-# Запускаем бота (основной поток)
 bot.infinity_polling()
