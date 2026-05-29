@@ -5,7 +5,6 @@ import threading
 import time
 from datetime import datetime, timedelta
 from supabase import create_client, Client
-from flask import Flask
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -218,40 +217,13 @@ def check_deadlines_background():
             print(f"Ошибка в фоновой проверке: {e}")
             time.sleep(60)
 
-# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER ==========
-web_app = Flask(__name__)
-
-@web_app.route('/')
-@web_app.route('/health')
-def health_check():
-    return "Bot is running!", 200
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
-
-# ========== ЗАПУСК С АВТОВОССТАНОВЛЕНИЕМ ==========
+# ========== ЗАПУСК ==========
 print("🚀 Бот запущен с Supabase!")
 print("Доступные команды: /start, /add, /list, /today, /tomorrow, /delete")
 print("☁️ Данные хранятся в Supabase, ничего не потеряется!")
 
-# Запускаем веб-сервер в отдельном потоке (для Render)
-web_thread = threading.Thread(target=run_web_server, daemon=True)
-web_thread.start()
-print(f"🌐 Веб-сервер для Render запущен на порту {os.environ.get('PORT', 10000)}")
-
-# Запускаем фоновую проверку дедлайнов
+# Запускаем фоновую проверку
 background_thread = threading.Thread(target=check_deadlines_background, daemon=True)
 background_thread.start()
 
-# Запускаем бота с автовосстановлением при ошибке 409
-while True:
-    try:
-        bot.infinity_polling(timeout=60, long_polling_timeout=60)
-    except Exception as e:
-        if "409" in str(e):
-            print("⚠️ Ошибка 409 (конфликт), перезапускаем через 10 секунд...")
-            time.sleep(10)
-        else:
-            print(f"❌ Другая ошибка: {e}")
-            time.sleep(5)
+bot.infinity_polling()
